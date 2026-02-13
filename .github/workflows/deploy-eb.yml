@@ -47,11 +47,11 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Deploy to Elastic Beanstalk
-        uses: aws-actions/aws-elasticbeanstalk-deploy@v1
+        uses: aws-actions/aws-elasticbeanstalk-deploy@v1.0.0
         with:
-          application_name: ${{ secrets.EB_APPLICATION_NAME }}
-          environment_name: ${{ secrets.EB_ENVIRONMENT_NAME }}
-          version_label: ${{ github.sha }}
+          application-name: ${{ secrets.EB_APPLICATION_NAME }}
+          environment-name: ${{ secrets.EB_ENVIRONMENT_NAME }}
+          version-label: ${{ github.sha }}
           region: ${{ secrets.AWS_REGION }}
-          deployment_package: app.zip
-          wait_for_environment_recovery: true
+          deployment-package: app.zip
+          wait-for-environment-recovery: true
