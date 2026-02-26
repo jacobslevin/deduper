@@ -133,8 +133,58 @@ def db_url() -> str:
 
 
 def _mysql_connect_params() -> dict[str, Any]:
-    """Parse DATABASE_URL (mysql://) and return MySQL connection params."""
-    url = db_url()
+    """
+    Return MySQL connection params.
+
+    Precedence:
+      1) DB_HOST / DB_USER / DB_PASSWORD / DB_PORT / DB_DATABASE (env or st.secrets)
+      2) DATABASE_URL (mysql://...) (env or st.secrets)
+    """
+
+    def _get(name: str, default: str | None = None) -> str | None:
+        v = os.getenv(name)
+        if v is not None:
+            v = v.strip()
+            if v != "":
+                return v
+        # Optional: allow Streamlit secrets as well
+        try:
+            if name in st.secrets:
+                return str(st.secrets[name]).strip()
+        except Exception:
+            pass
+        return default
+
+    # --- Option A: split env vars ---
+    host = _get("DB_HOST")
+    if host:
+        user = _get("DB_USER")
+        password = _get("DB_PASSWORD", "") or ""
+        database = _get("DB_DATABASE")
+
+        port_raw = _get("DB_PORT", "3306") or "3306"
+        try:
+            port = int(port_raw)
+        except ValueError as exc:
+            raise RuntimeError(f"DB_PORT must be an integer, got: {port_raw!r}") from exc
+
+        if not user:
+            raise RuntimeError("DB_USER is required when DB_HOST is set.")
+        if not database:
+            raise RuntimeError("DB_DATABASE is required when DB_HOST is set.")
+
+        return {
+            "host": host,
+            "port": port,
+            "user": user,
+            "password": password,
+            "database": database,
+            "autocommit": False,
+            "client_flags": [ClientFlag.MULTI_STATEMENTS],
+        }
+
+    # --- Option B: fallback to DATABASE_URL ---
+    url = db_url().strip()
     parsed = urlparse(url)
     return {
         "host": parsed.hostname or "localhost",
