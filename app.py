@@ -809,8 +809,7 @@ def submit_group_merge(
                     select
                       brand_id, brand_name, website_url, product_count, name_norm, compare_norm, domain_norm
                     from brands
-                    where project_id = %s and brand_id in (""" + _in_placeholders(len(unique_members)) + ")
-                    """,
+                    where project_id = %s and brand_id in (""" + _in_placeholders(len(unique_members)) + ")""",
                     (project_id, *unique_members),
                 )
                 brand_rows = {str(r["brand_id"]): r for r in cur.fetchall()}
@@ -1515,9 +1514,7 @@ def fetch_duplicate_group_context(project_id: str, seed_brand_a: str, seed_brand
                 select brand_id, brand_name, website_url, logo_url, product_count, category_norm, domain_norm
                 from brands
                 where project_id = %s
-                  and brand_id in (""" + _in_placeholders(len(brand_ids)) + ")
-                order by brand_name asc, brand_id asc
-                """,
+                  and brand_id in (""" + _in_placeholders(len(brand_ids)) + ") order by brand_name asc, brand_id asc""",
                 (project_id, *brand_ids),
             )
             members = list(cur.fetchall())
@@ -1537,10 +1534,7 @@ def fetch_duplicate_group_context(project_id: str, seed_brand_a: str, seed_brand
                 join brands ba on ba.project_id = c.project_id and ba.brand_id = c.brand_id_a
                 join brands bb on bb.project_id = c.project_id and bb.brand_id = c.brand_id_b
                 where c.project_id = %s
-                  and c.brand_id_a in (""" + _in_placeholders(len(brand_ids)) + ")
-                  and c.brand_id_b in (" + _in_placeholders(len(brand_ids)) + ")
-                order by c.score desc, c.created_at asc
-                """,
+                  and c.brand_id_a in (""" + _in_placeholders(len(brand_ids)) + ")and c.brand_id_b in (" + _in_placeholders(len(brand_ids)) + ") order by c.score desc, c.created_at asc""",
                 (project_id, *brand_ids, *brand_ids),
             )
             pair_rows = list(cur.fetchall())
