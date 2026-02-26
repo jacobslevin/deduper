@@ -1,5 +1,7 @@
 [server]
 headless = true
+maxUploadSize = 200
+maxMessageSize = 200
 
 [theme]
 base = "light"
