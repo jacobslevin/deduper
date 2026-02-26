@@ -1,37 +1,20 @@
-create extension if not exists pgcrypto;
-
-do $$
-begin
-  if not exists (select 1 from pg_type where typname = 'candidate_status') then
-    create type candidate_status as enum ('pending', 'locked', 'approved', 'rejected', 'skipped');
-  end if;
-end $$;
-
-do $$
-begin
-  if not exists (select 1 from pg_type where typname = 'decision_type') then
-    create type decision_type as enum ('approved', 'rejected', 'skipped');
-  end if;
-end $$;
+-- MySQL schema (same structure as PostgreSQL; same credentials/host)
 
 create table if not exists projects (
-  id uuid primary key default gen_random_uuid(),
+  id char(36) not null primary key,
   name text not null,
-  created_at timestamptz not null default now(),
+  created_at datetime(6) not null default (current_timestamp(6)),
   created_by text not null,
   csv_filename text not null,
   row_count integer not null,
   notes text,
-  removable_tokens jsonb not null default '[]'::jsonb,
-  matching_config jsonb not null default '{"min_score_to_show":90,"allow_category_assisted_low_confidence":true,"category_assisted_min_score":85,"include_low_confidence_candidates":false,"low_confidence_compare_threshold":78}'::jsonb
+  removable_tokens json not null default ('[]'),
+  matching_config json not null default ('{"min_score_to_show":90,"allow_category_assisted_low_confidence":true,"category_assisted_min_score":85,"include_low_confidence_candidates":false,"low_confidence_compare_threshold":78}')
 );
 
-alter table projects
-add column if not exists matching_config jsonb not null default '{"min_score_to_show":90,"allow_category_assisted_low_confidence":true,"category_assisted_min_score":85,"include_low_confidence_candidates":false,"low_confidence_compare_threshold":78}'::jsonb;
-
 create table if not exists brands (
-  project_id uuid not null references projects(id) on delete cascade,
-  brand_id text not null,
+  project_id char(36) not null,
+  brand_id varchar(255) not null,
   brand_name text not null,
   website_url text,
   logo_url text,
@@ -43,29 +26,26 @@ create table if not exists brands (
   host_norm text,
   domain_norm text,
   url_norm text,
-  primary key (project_id, brand_id)
+  primary key (project_id, brand_id),
+  foreign key (project_id) references projects(id) on delete cascade
 );
 
-create index if not exists idx_brands_project_domain on brands(project_id, domain_norm);
-create index if not exists idx_brands_project_compare on brands(project_id, compare_norm);
-
-alter table brands add column if not exists category_raw text;
-alter table brands add column if not exists category_norm text;
-alter table brands add column if not exists logo_url text;
-drop index if exists idx_brands_project_category;
+create index if not exists idx_brands_project_domain on brands(project_id, domain_norm(255));
+create index if not exists idx_brands_project_compare on brands(project_id, compare_norm(255));
 
 create table if not exists candidates (
-  id uuid primary key default gen_random_uuid(),
-  project_id uuid not null references projects(id) on delete cascade,
-  brand_id_a text not null,
-  brand_id_b text not null,
+  id char(36) not null primary key,
+  project_id char(36) not null,
+  brand_id_a varchar(255) not null,
+  brand_id_b varchar(255) not null,
   score integer not null,
-  reasons jsonb not null default '[]'::jsonb,
-  status candidate_status not null default 'pending',
+  reasons json not null default ('[]'),
+  status enum('pending', 'locked', 'approved', 'rejected', 'skipped') not null default 'pending',
   locked_by text,
-  locked_at timestamptz,
-  created_at timestamptz not null default now(),
-  unique (project_id, brand_id_a, brand_id_b),
+  locked_at datetime(6),
+  created_at datetime(6) not null default (current_timestamp(6)),
+  unique key uk_candidates_pair (project_id, brand_id_a, brand_id_b),
+  foreign key (project_id) references projects(id) on delete cascade,
   foreign key (project_id, brand_id_a) references brands(project_id, brand_id) on delete cascade,
   foreign key (project_id, brand_id_b) references brands(project_id, brand_id) on delete cascade
 );
@@ -74,24 +54,23 @@ create index if not exists idx_candidates_project_status on candidates(project_i
 create index if not exists idx_candidates_project_score on candidates(project_id, score desc);
 
 create table if not exists decisions (
-  id uuid primary key default gen_random_uuid(),
-  candidate_id uuid not null references candidates(id) on delete cascade,
-  project_id uuid not null references projects(id) on delete cascade,
-  decision decision_type not null,
-  winner_brand_id text,
-  loser_brand_id text,
+  id char(36) not null primary key,
+  candidate_id char(36) not null,
+  project_id char(36) not null,
+  decision enum('approved', 'rejected', 'skipped') not null,
+  winner_brand_id varchar(255),
+  loser_brand_id varchar(255),
   reviewer_name text not null,
-  decided_at timestamptz not null default now(),
+  decided_at datetime(6) not null default (current_timestamp(6)),
   notes text,
   winner_reason text,
   updated_winner_brand_name text,
   updated_winner_website_url text,
+  foreign key (candidate_id) references candidates(id) on delete cascade,
+  foreign key (project_id) references projects(id) on delete cascade,
   foreign key (project_id, winner_brand_id) references brands(project_id, brand_id) on delete set null,
   foreign key (project_id, loser_brand_id) references brands(project_id, brand_id) on delete set null
 );
-
-alter table decisions add column if not exists updated_winner_brand_name text;
-alter table decisions add column if not exists updated_winner_website_url text;
 
 create index if not exists idx_decisions_project on decisions(project_id, decided_at desc);
 create index if not exists idx_decisions_candidate on decisions(candidate_id);

@@ -3,14 +3,15 @@ from __future__ import annotations
 import json
 import os
 import re
+import uuid as uuid_module
 from datetime import datetime, timezone
 from io import StringIO
 from typing import Any
 from urllib.parse import urlparse
 
 import pandas as pd
-import psycopg
-from psycopg.rows import dict_row
+import mysql.connector
+from mysql.connector.constants import ClientFlag
 from rapidfuzz import fuzz
 import streamlit as st
 
@@ -131,6 +132,55 @@ def db_url() -> str:
     raise RuntimeError("DATABASE_URL not set. Configure Streamlit secrets or environment variable.")
 
 
+def _mysql_connect_params() -> dict[str, Any]:
+    """Parse DATABASE_URL (mysql://) and return MySQL connection params."""
+    url = db_url()
+    parsed = urlparse(url)
+    return {
+        "host": parsed.hostname or "localhost",
+        "port": parsed.port or 3306,
+        "user": parsed.username,
+        "password": parsed.password or "",
+        "database": (parsed.path or "/").lstrip("/") or None,
+        "autocommit": False,
+        "client_flags": [ClientFlag.MULTI_STATEMENTS],
+    }
+
+
+class _DictConnection:
+    """Wraps a MySQL connection so cursor() returns a dictionary cursor."""
+
+    def __init__(self, conn: mysql.connector.MySQLConnection) -> None:
+        self._conn = conn
+
+    def cursor(self, *args: Any, **kwargs: Any) -> Any:
+        return self._conn.cursor(*args, dictionary=True, **kwargs)
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
+
+    def __enter__(self) -> "_DictConnection":
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self._conn.close()
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+def get_conn() -> _DictConnection:
+    return _DictConnection(mysql.connector.connect(**_mysql_connect_params()))
+
+
+def _in_placeholders(n: int) -> str:
+    """Return %s,%s,... for MySQL IN clause."""
+    return ",".join(["%s"] * n)
+
+
 def admin_access_code() -> str | None:
     env_code = os.getenv("ADMIN_ACCESS_CODE")
     if env_code:
@@ -143,17 +193,14 @@ def admin_access_code() -> str | None:
     return None
 
 
-def get_conn() -> psycopg.Connection:
-    # Supabase poolers can error on server-side prepared statements across sessions.
-    return psycopg.connect(db_url(), row_factory=dict_row, prepare_threshold=None)
-
-
 def run_schema_setup() -> None:
     with open("db/schema.sql", "r", encoding="utf-8") as f:
         sql = f.read()
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql)
+            for result in cur.execute(sql, multi=True):
+                if result.with_rows:
+                    result.fetchall()
         conn.commit()
 
 
@@ -712,9 +759,9 @@ def submit_group_merge(
                     select
                       brand_id, brand_name, website_url, product_count, name_norm, compare_norm, domain_norm
                     from brands
-                    where project_id = %s and brand_id = any(%s)
+                    where project_id = %s and brand_id in (""" + _in_placeholders(len(unique_members)) + ")
                     """,
-                    (project_id, unique_members),
+                    (project_id, *unique_members),
                 )
                 brand_rows = {str(r["brand_id"]): r for r in cur.fetchall()}
                 missing = [x for x in unique_members if x not in brand_rows]
@@ -757,25 +804,25 @@ def submit_group_merge(
                         compare_ratio = fuzz.ratio(compare_a, compare_b) if compare_a and compare_b else 0.0
                         name_ratio = fuzz.ratio(name_a, name_b) if name_a and name_b else 0.0
                         score, reasons = score_pair(brand_a, brand_b, compare_ratio, name_ratio, project_matching_config)
+                        candidate_id = str(uuid_module.uuid4())
                         cur.execute(
                             """
-                            insert into candidates(project_id, brand_id_a, brand_id_b, score, reasons, status)
-                            values (%s, %s, %s, %s, %s, 'approved')
-                            returning id
+                            insert into candidates(id, project_id, brand_id_a, brand_id_b, score, reasons, status)
+                            values (%s, %s, %s, %s, %s, %s, 'approved')
                             """,
-                            (project_id, a, b, score, json.dumps(reasons)),
+                            (candidate_id, project_id, a, b, score, json.dumps(reasons)),
                         )
-                        candidate_id = str(cur.fetchone()["id"])
 
                     cur.execute(
                         """
                         insert into decisions(
-                          candidate_id, project_id, decision, winner_brand_id, loser_brand_id,
+                          id, candidate_id, project_id, decision, winner_brand_id, loser_brand_id,
                           reviewer_name, notes, winner_reason, updated_winner_brand_name, updated_winner_website_url
                         )
-                        values (%s, %s, 'approved', %s, %s, %s, %s, %s, %s, %s)
+                        values (%s, %s, %s, 'approved', %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
+                            str(uuid_module.uuid4()),
                             candidate_id,
                             project_id,
                             winner_brand_id,
@@ -849,30 +896,38 @@ def mark_cluster_no_dupes_from_state(project_id: str, candidate_id: str, reviewe
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    update candidates
-                    set status = 'rejected',
-                        locked_by = null,
-                        locked_at = null
+                    select id from candidates
                     where project_id = %s
-                      and id = any(%s)
+                      and id in (""" + _in_placeholders(len(candidate_ids)) + """)
                       and status in ('pending', 'locked')
-                    returning id
                     """,
-                    (project_id, candidate_ids),
+                    (project_id, *candidate_ids),
                 )
                 updated_ids = [str(r["id"]) for r in cur.fetchall()]
                 changed = len(updated_ids)
                 if updated_ids:
+                    cur.execute(
+                        """
+                        update candidates
+                        set status = 'rejected',
+                            locked_by = null,
+                            locked_at = null
+                        where project_id = %s
+                          and id in (""" + _in_placeholders(len(updated_ids)) + """)
+                        """,
+                        (project_id, *updated_ids),
+                    )
                     cur.executemany(
                         """
                         insert into decisions(
-                          candidate_id, project_id, decision, winner_brand_id, loser_brand_id,
+                          id, candidate_id, project_id, decision, winner_brand_id, loser_brand_id,
                           reviewer_name, notes, winner_reason
                         )
-                        values (%s, %s, 'rejected', null, null, %s, %s, %s)
+                        values (%s, %s, %s, 'rejected', null, null, %s, %s, %s)
                         """,
                         [
                             (
+                                str(uuid_module.uuid4()),
                                 cid,
                                 project_id,
                                 reviewer_name,
@@ -1021,15 +1076,16 @@ def insert_project_and_data(
 ) -> tuple[str, int]:
     matching_config = parse_matching_config(matching_config)
     candidates = generate_candidates(records, matching_config)
+    project_id = str(uuid_module.uuid4())
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                insert into projects(name, created_by, csv_filename, row_count, notes, removable_tokens, matching_config)
-                values (%s, %s, %s, %s, %s, %s, %s)
-                returning id
+                insert into projects(id, name, created_by, csv_filename, row_count, notes, removable_tokens, matching_config)
+                values (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
+                    project_id,
                     project_name,
                     reviewer,
                     filename,
@@ -1039,7 +1095,6 @@ def insert_project_and_data(
                     json.dumps(matching_config),
                 ),
             )
-            project_id = str(cur.fetchone()["id"])
 
             brand_rows = [
                 (
@@ -1066,34 +1121,34 @@ def insert_project_and_data(
                     category_raw, category_norm, name_norm, compare_norm, host_norm, domain_norm, url_norm
                 )
                 values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                on conflict (project_id, brand_id) do update
-                set
-                    brand_name = excluded.brand_name,
-                    website_url = excluded.website_url,
-                    logo_url = excluded.logo_url,
-                    product_count = excluded.product_count,
-                    category_raw = excluded.category_raw,
-                    category_norm = excluded.category_norm,
-                    name_norm = excluded.name_norm,
-                    compare_norm = excluded.compare_norm,
-                    host_norm = excluded.host_norm,
-                    domain_norm = excluded.domain_norm,
-                    url_norm = excluded.url_norm
+                on duplicate key update
+                    brand_name = values(brand_name),
+                    website_url = values(website_url),
+                    logo_url = values(logo_url),
+                    product_count = values(product_count),
+                    category_raw = values(category_raw),
+                    category_norm = values(category_norm),
+                    name_norm = values(name_norm),
+                    compare_norm = values(compare_norm),
+                    host_norm = values(host_norm),
+                    domain_norm = values(domain_norm),
+                    url_norm = values(url_norm)
                 """,
                 brand_rows,
             )
 
             candidate_rows = [
-                (project_id, c["brand_id_a"], c["brand_id_b"], c["score"], json.dumps(c["reasons"])) for c in candidates
+                (str(uuid_module.uuid4()), project_id, c["brand_id_a"], c["brand_id_b"], c["score"], json.dumps(c["reasons"]))
+                for c in candidates
             ]
             if candidate_rows:
                 cur.executemany(
                     """
-                    insert into candidates(project_id, brand_id_a, brand_id_b, score, reasons)
-                    values (%s, %s, %s, %s, %s)
-                    on conflict (project_id, brand_id_a, brand_id_b) do update
-                    set score = excluded.score,
-                        reasons = excluded.reasons,
+                    insert into candidates(id, project_id, brand_id_a, brand_id_b, score, reasons)
+                    values (%s, %s, %s, %s, %s, %s)
+                    on duplicate key update
+                        score = values(score),
+                        reasons = values(reasons),
                         status = 'pending',
                         locked_by = null,
                         locked_at = null
@@ -1111,11 +1166,11 @@ def fetch_projects() -> list[dict[str, Any]]:
                 """
                 select
                     p.*,
-                    count(*) filter (where c.status = 'pending') as pending_count,
-                    count(*) filter (where c.status = 'locked') as locked_count,
-                    count(*) filter (where c.status = 'approved') as approved_count,
-                    count(*) filter (where c.status = 'rejected') as rejected_count,
-                    count(*) filter (where c.status = 'skipped') as skipped_count
+                    sum(case when c.status = 'pending' then 1 else 0 end) as pending_count,
+                    sum(case when c.status = 'locked' then 1 else 0 end) as locked_count,
+                    sum(case when c.status = 'approved' then 1 else 0 end) as approved_count,
+                    sum(case when c.status = 'rejected' then 1 else 0 end) as rejected_count,
+                    sum(case when c.status = 'skipped' then 1 else 0 end) as skipped_count
                 from projects p
                 left join candidates c on c.project_id = p.id
                 group by p.id
@@ -1214,13 +1269,14 @@ def regenerate_project_candidates(project_id: str, removable_tokens: list[str], 
 
             candidates = generate_candidates(records, matching_config)
             rows = [
-                (project_id, c["brand_id_a"], c["brand_id_b"], c["score"], json.dumps(c["reasons"])) for c in candidates
+                (str(uuid_module.uuid4()), project_id, c["brand_id_a"], c["brand_id_b"], c["score"], json.dumps(c["reasons"]))
+                for c in candidates
             ]
             if rows:
                 cur.executemany(
                     """
-                    insert into candidates(project_id, brand_id_a, brand_id_b, score, reasons)
-                    values (%s, %s, %s, %s, %s)
+                    insert into candidates(id, project_id, brand_id_a, brand_id_b, score, reasons)
+                    values (%s, %s, %s, %s, %s, %s)
                     """,
                     rows,
                 )
@@ -1255,7 +1311,7 @@ def queue_query(
         """
         (
           c.status = 'pending'
-          or (c.status = 'locked' and c.locked_at < now() - interval '10 minutes')
+          or (c.status = 'locked' and c.locked_at < now() - interval 10 minute)
           or (c.status = 'locked' and c.locked_by = %(reviewer_name)s)
         )
         """
@@ -1273,10 +1329,10 @@ def queue_query(
         clauses.append(
             """
             (
-              ba.brand_name ilike %(search)s
-              or bb.brand_name ilike %(search)s
-              or ba.brand_id ilike %(search)s
-              or bb.brand_id ilike %(search)s
+              ba.brand_name like %(search)s
+              or bb.brand_name like %(search)s
+              or ba.brand_id like %(search)s
+              or bb.brand_id like %(search)s
             )
             """
         )
@@ -1367,9 +1423,9 @@ def fetch_duplicate_group_context(project_id: str, seed_brand_a: str, seed_brand
             cur.execute(
                 """
                 with recursive component as (
-                  select %s::text as brand_id
+                  select %s as brand_id
                   union
-                  select %s::text as brand_id
+                  select %s as brand_id
                   union
                   select
                     case
@@ -1409,10 +1465,10 @@ def fetch_duplicate_group_context(project_id: str, seed_brand_a: str, seed_brand
                 select brand_id, brand_name, website_url, logo_url, product_count, category_norm, domain_norm
                 from brands
                 where project_id = %s
-                  and brand_id = any(%s)
+                  and brand_id in (""" + _in_placeholders(len(brand_ids)) + ")
                 order by brand_name asc, brand_id asc
                 """,
-                (project_id, brand_ids),
+                (project_id, *brand_ids),
             )
             members = list(cur.fetchall())
 
@@ -1431,11 +1487,11 @@ def fetch_duplicate_group_context(project_id: str, seed_brand_a: str, seed_brand
                 join brands ba on ba.project_id = c.project_id and ba.brand_id = c.brand_id_a
                 join brands bb on bb.project_id = c.project_id and bb.brand_id = c.brand_id_b
                 where c.project_id = %s
-                  and c.brand_id_a = any(%s)
-                  and c.brand_id_b = any(%s)
+                  and c.brand_id_a in (""" + _in_placeholders(len(brand_ids)) + ")
+                  and c.brand_id_b in (" + _in_placeholders(len(brand_ids)) + ")
                 order by c.score desc, c.created_at asc
                 """,
-                (project_id, brand_ids, brand_ids),
+                (project_id, *brand_ids, *brand_ids),
             )
             pair_rows = list(cur.fetchall())
 
@@ -1525,9 +1581,9 @@ def fetch_cluster_size(project_id: str, seed_brand_a: str, seed_brand_b: str) ->
             cur.execute(
                 """
                 with recursive component as (
-                  select %s::text as brand_id
+                  select %s as brand_id
                   union
-                  select %s::text as brand_id
+                  select %s as brand_id
                   union
                   select
                     case
@@ -1683,12 +1739,13 @@ def submit_decision(
                 cur.execute(
                     """
                     insert into decisions(
-                        candidate_id, project_id, decision, winner_brand_id, loser_brand_id,
+                        id, candidate_id, project_id, decision, winner_brand_id, loser_brand_id,
                         reviewer_name, notes, winner_reason
                     )
-                    values (%s, %s, %s, %s, %s, %s, %s, %s)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
+                        str(uuid_module.uuid4()),
                         candidate_id,
                         project_id,
                         decision,
@@ -2846,7 +2903,7 @@ def main() -> None:
 
     if admin_mode:
         st.title("Brand Dedupe Tool")
-        st.caption("Collaborative duplicate review queue with Supabase Postgres persistence.")
+        st.caption("Collaborative duplicate review queue with MySQL persistence.")
         pages = ["Upload CSV", "Project Settings", "Exports", "Diagnostics"]
         page = st.sidebar.radio("Page", pages)
         if projects:
