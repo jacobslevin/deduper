@@ -1699,7 +1699,7 @@ def lock_candidate(project_id: str, candidate_id: str, reviewer_name: str) -> bo
                   and project_id = %s
                   and (
                     status = 'pending'
-                    or (status = 'locked' and locked_at < now() - interval '10 minutes')
+                    or (status = 'locked' and locked_at < date_sub(now(), interval 10 minute))
                     or (status = 'locked' and locked_by = %s)
                   )
                 """,
