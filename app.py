@@ -2671,26 +2671,29 @@ def render_candidate_decision(selected: dict[str, Any], project_id: str, reviewe
     merge_disabled = bool(merge_block_reasons)
 
     c1, c2, _ = st.columns([2, 1.4, 3.6])
+    merge_clicked = False
+    no_dupes_clicked = False
     with c1:
-        st.button(
+        merge_clicked = st.button(
             "Merge selected losers into selected winner",
             key=f"save_group_merge_{selected_id}",
             use_container_width=True,
             disabled=merge_disabled,
-            on_click=save_group_merge_from_state,
-            args=(project_id, selected_id, reviewer_name),
         )
     with c2:
-        st.button(
+        no_dupes_clicked = st.button(
             "No dupes in this cluster",
             key=f"no_dupes_cluster_{selected_id}",
             use_container_width=True,
-            on_click=mark_cluster_no_dupes_from_state,
-            args=(project_id, selected_id, reviewer_name),
         )
 
     if merge_block_reasons:
         st.warning("Cannot merge yet: " + " ".join(merge_block_reasons))
+
+    if merge_clicked:
+        save_group_merge_from_state(project_id, selected_id, reviewer_name)
+    if no_dupes_clicked:
+        mark_cluster_no_dupes_from_state(project_id, selected_id, reviewer_name)
 
     flash = st.session_state.pop(flash_key, None)
     if flash:
@@ -2935,6 +2938,10 @@ def main() -> None:
             if st.button("Exit admin mode"):
                 st.session_state["admin_unlocked"] = False
                 st.rerun()
+
+        app_version = os.getenv("APP_VERSION", "").strip()
+        if app_version:
+            st.caption(f"App version: {app_version}")
 
         # auto-dismissed toasts are shown in main content area
 
