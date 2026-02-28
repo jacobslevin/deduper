@@ -2663,13 +2663,20 @@ def render_candidate_decision(selected: dict[str, Any], project_id: str, reviewe
     else:
         st.session_state[f"group_candidate_ids_{selected_id}"] = [str(selected_id)]
 
+    merge_block_reasons: list[str] = []
+    if chosen_winner is None:
+        merge_block_reasons.append("Select one winner.")
+    if not chosen_losers:
+        merge_block_reasons.append("Select at least one loser to merge (uncheck Exclude on one row).")
+    merge_disabled = bool(merge_block_reasons)
+
     c1, c2, _ = st.columns([2, 1.4, 3.6])
     with c1:
         st.button(
             "Merge selected losers into selected winner",
             key=f"save_group_merge_{selected_id}",
             use_container_width=True,
-            disabled=(chosen_winner is None or not chosen_losers),
+            disabled=merge_disabled,
             on_click=save_group_merge_from_state,
             args=(project_id, selected_id, reviewer_name),
         )
@@ -2682,12 +2689,19 @@ def render_candidate_decision(selected: dict[str, Any], project_id: str, reviewe
             args=(project_id, selected_id, reviewer_name),
         )
 
+    if merge_block_reasons:
+        st.warning("Cannot merge yet: " + " ".join(merge_block_reasons))
+
     flash = st.session_state.pop(flash_key, None)
     if flash:
         level, message = flash
         icon = "✅" if level == "success" else "⚠️"
         # Avoid duplicate toast: queue page already displays this notification.
         st.session_state.pop("global_flash", None)
+        if level == "success":
+            st.success(message)
+        else:
+            st.error(message)
         st.toast(message, icon=icon)
     if st.session_state.pop("queue_should_rerun", False):
         st.rerun()
