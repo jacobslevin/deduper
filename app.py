@@ -2426,7 +2426,12 @@ def handle_sort_change(project_id: str, reviewer_name: str) -> None:
     st.session_state["queue_should_rerun"] = True
 
 
-def render_candidate_decision(selected: dict[str, Any], project_id: str, reviewer_name: str) -> None:
+def render_candidate_decision(
+    selected: dict[str, Any],
+    project_id: str,
+    reviewer_name: str,
+    allow_without_lock: bool = False,
+) -> None:
     selected_id = str(selected["id"])
     selected_state_key = f"selected_candidate_{project_id}"
     lock_state_key = f"locked_candidate_{project_id}"
@@ -2439,7 +2444,10 @@ def render_candidate_decision(selected: dict[str, Any], project_id: str, reviewe
     already_locked_for_me = (
         selected["status"] == "locked" and selected["locked_by"] == reviewer_name
     )
-    if st.session_state.get(lock_state_key) != selected_id and not already_locked_for_me:
+    if allow_without_lock:
+        st.session_state[lock_state_key] = None
+        st.caption("Revisiting your previous cluster selection.")
+    elif st.session_state.get(lock_state_key) != selected_id and not already_locked_for_me:
         if lock_candidate(project_id, selected_id, reviewer_name):
             st.session_state[lock_state_key] = selected_id
             st.info("This candidate is reserved for you for 10 minutes.")
@@ -2875,7 +2883,13 @@ def render_reviewer_queue(project: dict[str, Any], reviewer_name: str) -> None:
         return
 
     st.session_state[active_key] = str(candidate["id"])
-    render_candidate_decision(candidate, project_id, reviewer_name)
+    is_revisit_active = str(candidate["id"]) == revisit_candidate_id
+    render_candidate_decision(
+        candidate,
+        project_id,
+        reviewer_name,
+        allow_without_lock=is_revisit_active,
+    )
 
 
 
