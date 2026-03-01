@@ -920,6 +920,8 @@ def save_group_merge_from_state(project_id: str, candidate_id: str, reviewer_nam
         st.session_state[f"queue_flash_{project_id}"] = ("success", msg)
         st.session_state["global_flash"] = ("success", msg)
         st.session_state["last_action_result"] = ("success", msg)
+        st.session_state.pop(f"last_no_dupe_cluster_{project_id}", None)
+        st.session_state.pop(f"revisit_cluster_id_{project_id}", None)
         st.session_state[f"active_candidate_id_{project_id}"] = None
     else:
         st.session_state[f"queue_flash_{project_id}"] = ("error", msg)
@@ -991,6 +993,8 @@ def mark_cluster_no_dupes_from_state(project_id: str, candidate_id: str, reviewe
             st.session_state[f"queue_flash_{project_id}"] = ("success", msg)
             st.session_state["global_flash"] = ("success", msg)
             st.session_state["last_action_result"] = ("success", msg)
+            st.session_state[f"last_no_dupe_cluster_{project_id}"] = str(candidate_id)
+            st.session_state.pop(f"revisit_cluster_id_{project_id}", None)
             st.session_state[f"active_candidate_id_{project_id}"] = None
         except Exception as exc:
             conn.rollback()
@@ -2670,9 +2674,13 @@ def render_candidate_decision(selected: dict[str, Any], project_id: str, reviewe
         merge_block_reasons.append("Select at least one loser to merge (uncheck Exclude on one row).")
     merge_disabled = bool(merge_block_reasons)
 
-    c1, c2, _ = st.columns([2, 1.4, 3.6])
+    last_no_dupe_cluster_id = str(st.session_state.get(f"last_no_dupe_cluster_{project_id}") or "")
+    show_back_to_prior = bool(last_no_dupe_cluster_id) and last_no_dupe_cluster_id != selected_id
+
+    c1, c2, c3 = st.columns([2, 1.4, 3.6])
     merge_clicked = False
     no_dupes_clicked = False
+    go_back_clicked = False
     with c1:
         merge_clicked = st.button(
             "Merge selected losers into selected winner",
@@ -2686,6 +2694,13 @@ def render_candidate_decision(selected: dict[str, Any], project_id: str, reviewe
             key=f"no_dupes_cluster_{selected_id}",
             use_container_width=True,
         )
+    with c3:
+        if show_back_to_prior:
+            go_back_clicked = st.button(
+                "Go back to prior cluster",
+                key=f"go_back_prior_{selected_id}",
+                type="tertiary",
+            )
 
     if merge_block_reasons:
         st.warning("Cannot merge yet: " + " ".join(merge_block_reasons))
@@ -2694,6 +2709,10 @@ def render_candidate_decision(selected: dict[str, Any], project_id: str, reviewe
         save_group_merge_from_state(project_id, selected_id, reviewer_name)
     if no_dupes_clicked:
         mark_cluster_no_dupes_from_state(project_id, selected_id, reviewer_name)
+    if go_back_clicked and last_no_dupe_cluster_id:
+        st.session_state[f"revisit_cluster_id_{project_id}"] = last_no_dupe_cluster_id
+        st.session_state[f"active_candidate_id_{project_id}"] = last_no_dupe_cluster_id
+        st.rerun()
 
     flash = st.session_state.pop(flash_key, None)
     if flash:
@@ -2800,6 +2819,8 @@ def render_reviewer_queue(project: dict[str, Any], reviewer_name: str) -> None:
         queue = [r[2] for r in ranked]
 
     active_key = f"active_candidate_id_{project_id}"
+    revisit_key = f"revisit_cluster_id_{project_id}"
+    revisit_candidate_id = str(st.session_state.get(revisit_key) or "")
     active_candidate_id = st.session_state.get(active_key)
     candidate = None
 
@@ -2809,21 +2830,26 @@ def render_reviewer_queue(project: dict[str, Any], reviewer_name: str) -> None:
         if candidate:
             status = str(candidate.get("status") or "")
             locked_by = str(candidate.get("locked_by") or "")
+            is_revisit_target = str(candidate.get("id")) == revisit_candidate_id
             is_open_for_me = (
                 status == "pending"
                 or (status == "locked" and locked_by == reviewer_name)
             )
-            if not is_open_for_me:
+            if not is_open_for_me and not is_revisit_target:
                 candidate = None
         if candidate:
-            already_mine = candidate["status"] == "locked" and candidate["locked_by"] == reviewer_name
-            if not already_mine and not lock_candidate(project_id, str(candidate["id"]), reviewer_name):
-                candidate = None
-            elif not already_mine:
-                candidate["status"] = "locked"
-                candidate["locked_by"] = reviewer_name
+            is_revisit_target = str(candidate.get("id")) == revisit_candidate_id
+            if not is_revisit_target:
+                already_mine = candidate["status"] == "locked" and candidate["locked_by"] == reviewer_name
+                if not already_mine and not lock_candidate(project_id, str(candidate["id"]), reviewer_name):
+                    candidate = None
+                elif not already_mine:
+                    candidate["status"] = "locked"
+                    candidate["locked_by"] = reviewer_name
         if candidate is None:
             st.session_state[active_key] = None
+            if revisit_candidate_id:
+                st.session_state.pop(revisit_key, None)
 
     if candidate is None:
         skip_candidate_id = st.session_state.pop(f"skip_candidate_on_next_pick_{project_id}", None)
@@ -2843,6 +2869,8 @@ def render_reviewer_queue(project: dict[str, Any], reviewer_name: str) -> None:
 
     if not candidate:
         st.session_state[active_key] = None
+        if revisit_candidate_id:
+            st.session_state.pop(revisit_key, None)
         st.success("No pending candidates left to review.")
         return
 
