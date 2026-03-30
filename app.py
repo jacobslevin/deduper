@@ -2669,6 +2669,18 @@ def render_candidate_decision(
     with st.expander("Add Merge Notes (Optional)"):
         st.text_area("Merge notes", key=f"group_notes_{selected_id}", label_visibility="collapsed")
     flash_key = f"queue_flash_{project_id}"
+    flash = st.session_state.pop(flash_key, None)
+    if flash:
+        level, message = flash
+        icon = "✅" if level == "success" else "⚠️"
+        # Avoid duplicate toast: queue page already displays this notification.
+        st.session_state.pop("global_flash", None)
+        if level == "success":
+            st.success(message)
+        else:
+            st.error(message)
+        st.toast(message, icon=icon)
+
     st.session_state[f"group_winner_reason_{selected_id}"] = winner_reason_readable
     if not related_pairs_df.empty and "candidate_id" in related_pairs_df.columns:
         st.session_state[f"group_candidate_ids_{selected_id}"] = [str(x) for x in related_pairs_df["candidate_id"].tolist()]
@@ -2676,7 +2688,7 @@ def render_candidate_decision(
         st.session_state[f"group_candidate_ids_{selected_id}"] = [str(selected_id)]
 
     merge_block_reasons: list[str] = []
-    if chosen_winner is None:
+    if not chosen_winner:
         merge_block_reasons.append("Select one winner.")
     if not chosen_losers:
         merge_block_reasons.append("Select at least one loser to merge (uncheck Exclude on one row).")
@@ -2722,17 +2734,6 @@ def render_candidate_decision(
         st.session_state[f"active_candidate_id_{project_id}"] = last_no_dupe_cluster_id
         st.rerun()
 
-    flash = st.session_state.pop(flash_key, None)
-    if flash:
-        level, message = flash
-        icon = "✅" if level == "success" else "⚠️"
-        # Avoid duplicate toast: queue page already displays this notification.
-        st.session_state.pop("global_flash", None)
-        if level == "success":
-            st.success(message)
-        else:
-            st.error(message)
-        st.toast(message, icon=icon)
     if st.session_state.pop("queue_should_rerun", False):
         st.rerun()
 
