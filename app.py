@@ -894,6 +894,7 @@ def submit_group_merge(
 def save_group_merge_from_state(project_id: str, candidate_id: str, reviewer_name: str) -> None:
     winner_id = st.session_state.get(f"group_winner_{candidate_id}")
     loser_ids = st.session_state.get(f"group_loser_ids_{candidate_id}", [])
+    group_candidate_ids = [str(x) for x in st.session_state.get(f"group_candidate_ids_{candidate_id}", [])]
     notes = st.session_state.get(f"group_notes_{candidate_id}")
     winner_reason = st.session_state.get(f"group_winner_reason_{candidate_id}", "Selected as group winner by reviewer.")
     updated_name = st.session_state.get(f"group_updated_winner_name_{candidate_id}")
@@ -917,6 +918,70 @@ def save_group_merge_from_state(project_id: str, candidate_id: str, reviewer_nam
         updated_winner_website_url=(updated_url or "").strip() or None,
     )
     if ok:
+        # Close any remaining pending/locked rows in this cluster so the reviewer advances.
+        if group_candidate_ids:
+            with get_conn() as conn:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            select id, brand_id_a, brand_id_b, status
+                            from candidates
+                            where project_id = %s
+                              and id in (""" + _in_placeholders(len(group_candidate_ids)) + """)
+                            """,
+                            (project_id, *group_candidate_ids),
+                        )
+                        rows = list(cur.fetchall())
+                        loser_set = {str(x) for x in loser_ids}
+                        approved_pairs = {
+                            tuple(sorted([str(winner_id), str(loser_id)]))
+                            for loser_id in loser_set
+                        }
+                        auto_close_ids: list[str] = []
+                        for row in rows:
+                            pair = tuple(sorted([str(row["brand_id_a"]), str(row["brand_id_b"])]))
+                            if pair in approved_pairs:
+                                continue
+                            status = str(row.get("status") or "")
+                            if status in ("pending", "locked", "approved", "skipped"):
+                                auto_close_ids.append(str(row["id"]))
+
+                        if auto_close_ids:
+                            cur.execute(
+                                """
+                                update candidates
+                                set status = 'rejected',
+                                    locked_by = null,
+                                    locked_at = null
+                                where project_id = %s
+                                  and id in (""" + _in_placeholders(len(auto_close_ids)) + """)
+                                """,
+                                (project_id, *auto_close_ids),
+                            )
+                            cur.executemany(
+                                """
+                                insert into decisions(
+                                  id, candidate_id, project_id, decision, winner_brand_id, loser_brand_id,
+                                  reviewer_name, notes, winner_reason
+                                )
+                                values (%s, %s, %s, 'rejected', null, null, %s, %s, %s)
+                                """,
+                                [
+                                    (
+                                        str(uuid_module.uuid4()),
+                                        cid,
+                                        project_id,
+                                        reviewer_name,
+                                        "Auto-closed after cluster merge",
+                                        "Resolved by grouped merge winner selection.",
+                                    )
+                                    for cid in auto_close_ids
+                                ],
+                            )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
         st.session_state[f"queue_flash_{project_id}"] = ("success", msg)
         st.session_state["global_flash"] = ("success", msg)
         st.session_state["last_action_result"] = ("success", msg)
