@@ -1468,6 +1468,7 @@ def queue_query(
           c.locked_by,
           c.locked_at,
           ba.brand_name as brand_name_a,
+          ba.logo_url as logo_url_a,
           ba.website_url as website_url_a,
           ba.product_count as product_count_a,
           ba.category_norm as category_norm_a,
@@ -1475,6 +1476,7 @@ def queue_query(
           ba.compare_norm as compare_norm_a,
           ba.domain_norm as domain_norm_a,
           bb.brand_name as brand_name_b,
+          bb.logo_url as logo_url_b,
           bb.website_url as website_url_b,
           bb.product_count as product_count_b,
           bb.category_norm as category_norm_b,
@@ -2864,7 +2866,12 @@ def render_reviewer_queue(project: dict[str, Any], reviewer_name: str) -> None:
 
     sort_mode = st.selectbox(
         "Sort candidates by",
-        options=["Highest confidence", "Lowest confidence", "Most brands in cluster"],
+        options=[
+            "Highest confidence",
+            "Lowest confidence",
+            "Most brands in cluster",
+            "At least 1 brand has a logo",
+        ],
         key=f"review_sort_mode_{project['id']}",
         on_change=handle_sort_change,
         args=(project_id, reviewer_name),
@@ -2891,6 +2898,13 @@ def render_reviewer_queue(project: dict[str, Any], reviewer_name: str) -> None:
             ranked.append((size, int(row["score"]), row))
         ranked.sort(key=lambda x: (-x[0], -x[1]))
         queue = [r[2] for r in ranked]
+    elif sort_mode == "At least 1 brand has a logo":
+        ranked_logo: list[tuple[int, int, dict[str, Any]]] = []
+        for row in queue:
+            has_logo = bool(to_str(row.get("logo_url_a")) or to_str(row.get("logo_url_b")))
+            ranked_logo.append((1 if has_logo else 0, int(row["score"]), row))
+        ranked_logo.sort(key=lambda x: (-x[0], -x[1]))
+        queue = [r[2] for r in ranked_logo]
 
     active_key = f"active_candidate_id_{project_id}"
     revisit_key = f"revisit_cluster_id_{project_id}"
