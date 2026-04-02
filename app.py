@@ -1413,6 +1413,7 @@ def queue_query(
     filters: dict[str, Any],
     limit: int,
     score_order: str = "desc",
+    prioritize_logo: bool = False,
 ) -> list[dict[str, Any]]:
     order_dir = "asc" if str(score_order).lower() == "asc" else "desc"
     clauses = ["c.project_id = %(project_id)s"]
@@ -1457,6 +1458,13 @@ def queue_query(
 
     where_sql = " and ".join(clauses)
 
+    order_sql = f"c.score {order_dir}, c.created_at asc"
+    if prioritize_logo:
+        order_sql = (
+            "(case when ba.logo_url is not null or bb.logo_url is not null then 1 else 0 end) desc, "
+            + order_sql
+        )
+
     query = f"""
         select
           c.id,
@@ -1487,7 +1495,7 @@ def queue_query(
         join brands ba on ba.project_id = c.project_id and ba.brand_id = c.brand_id_a
         join brands bb on bb.project_id = c.project_id and bb.brand_id = c.brand_id_b
         where {where_sql}
-        order by c.score {order_dir}, c.created_at asc
+        order by {order_sql}
         limit %(limit)s
     """
 
@@ -2458,7 +2466,14 @@ def fetch_next_candidate_for_reviewer(
         "search": "",
     }
     score_order = "asc" if sort_mode == "Lowest confidence" else "desc"
-    queue = queue_query(project_id, reviewer_name, filters, limit=150, score_order=score_order)
+    queue = queue_query(
+        project_id,
+        reviewer_name,
+        filters,
+        limit=150,
+        score_order=score_order,
+        prioritize_logo=(sort_mode == "At least 1 brand has a logo"),
+    )
 
     if sort_mode == "Most brands in cluster":
         cluster_sizes = cluster_sizes_from_queue_rows(queue)
@@ -2898,13 +2913,6 @@ def render_reviewer_queue(project: dict[str, Any], reviewer_name: str) -> None:
             ranked.append((size, int(row["score"]), row))
         ranked.sort(key=lambda x: (-x[0], -x[1]))
         queue = [r[2] for r in ranked]
-    elif sort_mode == "At least 1 brand has a logo":
-        ranked_logo: list[tuple[int, int, dict[str, Any]]] = []
-        for row in queue:
-            has_logo = bool(to_str(row.get("logo_url_a")) or to_str(row.get("logo_url_b")))
-            ranked_logo.append((1 if has_logo else 0, int(row["score"]), row))
-        ranked_logo.sort(key=lambda x: (-x[0], -x[1]))
-        queue = [r[2] for r in ranked_logo]
 
     active_key = f"active_candidate_id_{project_id}"
     revisit_key = f"revisit_cluster_id_{project_id}"
