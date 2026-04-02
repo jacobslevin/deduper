@@ -1414,6 +1414,7 @@ def queue_query(
     limit: int,
     score_order: str = "desc",
     prioritize_logo: bool = False,
+    require_logo: bool = False,
 ) -> list[dict[str, Any]]:
     order_dir = "asc" if str(score_order).lower() == "asc" else "desc"
     clauses = ["c.project_id = %(project_id)s"]
@@ -1444,6 +1445,15 @@ def queue_query(
         clauses.append("(ba.website_url is null or bb.website_url is null)")
     if filters["product_count_diff"]:
         clauses.append("ba.product_count is not null and bb.product_count is not null and ba.product_count <> bb.product_count")
+    if require_logo:
+        clauses.append(
+            """
+            (
+              nullif(trim(ba.logo_url), '') is not null
+              or nullif(trim(bb.logo_url), '') is not null
+            )
+            """
+        )
     if filters["search"]:
         clauses.append(
             """
@@ -1503,6 +1513,10 @@ def queue_query(
         with conn.cursor() as cur:
             cur.execute(query, params)
             return list(cur.fetchall())
+
+
+def candidate_has_logo(row: dict[str, Any]) -> bool:
+    return bool(to_str(row.get("logo_url_a")) or to_str(row.get("logo_url_b")))
 
 
 def fetch_candidate_by_id(project_id: str, candidate_id: str) -> dict[str, Any] | None:
@@ -2473,6 +2487,7 @@ def fetch_next_candidate_for_reviewer(
         limit=150,
         score_order=score_order,
         prioritize_logo=(sort_mode == "At least 1 brand has a logo"),
+        require_logo=(sort_mode == "At least 1 brand has a logo"),
     )
 
     if sort_mode == "Most brands in cluster":
@@ -2903,7 +2918,16 @@ def render_reviewer_queue(project: dict[str, Any], reviewer_name: str) -> None:
         "search": "",
     }
     score_order = "asc" if sort_mode == "Lowest confidence" else "desc"
-    queue = queue_query(project_id, reviewer_name, filters, limit=150, score_order=score_order)
+    logo_mode_active = sort_mode == "At least 1 brand has a logo"
+    queue = queue_query(
+        project_id,
+        reviewer_name,
+        filters,
+        limit=150,
+        score_order=score_order,
+        prioritize_logo=logo_mode_active,
+        require_logo=logo_mode_active,
+    )
 
     if sort_mode == "Most brands in cluster":
         cluster_sizes = cluster_sizes_from_queue_rows(queue)
@@ -2923,6 +2947,8 @@ def render_reviewer_queue(project: dict[str, Any], reviewer_name: str) -> None:
     # Keep the current cluster pinned while the reviewer edits controls.
     if active_candidate_id:
         candidate = fetch_candidate_by_id(project_id, str(active_candidate_id))
+        if candidate and logo_mode_active and not candidate_has_logo(candidate):
+            candidate = None
         if candidate:
             status = str(candidate.get("status") or "")
             locked_by = str(candidate.get("locked_by") or "")
@@ -2956,6 +2982,8 @@ def render_reviewer_queue(project: dict[str, Any], reviewer_name: str) -> None:
                 queue = preferred + fallback
 
         for row in queue:
+            if logo_mode_active and not candidate_has_logo(row):
+                continue
             if lock_candidate(project_id, str(row["id"]), reviewer_name):
                 row["status"] = "locked"
                 row["locked_by"] = reviewer_name
